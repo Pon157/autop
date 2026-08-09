@@ -1,0 +1,6 @@
+aiogram==3.15.0
+Telethon==1.36.0
+yookassa==3.3.0
+APScheduler==3.10.4
+aiohttp==3.9.3
+python-dotenv==1.0.1
