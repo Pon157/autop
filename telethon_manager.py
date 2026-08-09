@@ -19,6 +19,7 @@ class AccountManager:
     def __init__(self):
         self.clients: Dict[int, TelegramClient] = {}
         self.flood_waits: Dict[int, int] = {}
+        self._code_hashes: Dict[str, str] = {}  # phone -> phone_code_hash
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
@@ -61,10 +62,14 @@ class AccountManager:
             await client.connect()
             if not await client.is_user_authorized():
                 if not code:
-                    await client.send_code_request(phone)
+                    result = await client.send_code_request(phone)
+                    self._code_hashes[phone] = result.phone_code_hash
                     return {"status": "code_needed", "phone": phone, "session": session_name}
+                phone_code_hash = self._code_hashes.get(phone)
+                if not phone_code_hash:
+                    return {"status": "error", "msg": "Сессия устарела. Начните заново."}
                 try:
-                    await client.sign_in(phone, code)
+                    await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
                 except SessionPasswordNeededError:
                     if not password:
                         return {"status": "password_needed", "phone": phone, "session": session_name}
