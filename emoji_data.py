@@ -181,6 +181,9 @@ BACK = "⬅️"
 FORWARD = ARROW_RIGHT
 
 
+QR = "📲"
+UPLOAD = "📤"
+
 def get_emoji(emoji_char: str) -> str:
     """Получить премиум ID эмодзи по символу"""
     return PREMIUM_EMOJIS.get(emoji_char, emoji_char)
