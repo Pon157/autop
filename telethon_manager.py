@@ -20,6 +20,7 @@ class AccountManager:
         self.clients: Dict[int, TelegramClient] = {}
         self.flood_waits: Dict[int, int] = {}
         self._code_hashes: Dict[str, str] = {}  # phone -> phone_code_hash
+        self._pending_qr: Dict[str, dict] = {}  # phone -> {client, qr_login, session, owner_id, bot}
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
@@ -92,6 +93,149 @@ class AccountManager:
         except Exception as e:
             await client.disconnect()
             return {"status": "error", "msg": str(e)}
+
+    async def start_qr_login(self, phone: str, owner_id: int, bot) -> dict:
+        """Начало QR-логина. Возвращает QR-изображение или URL."""
+        try:
+            import qrcode
+            from io import BytesIO
+            QR_AVAILABLE = True
+        except ImportError:
+            QR_AVAILABLE = False
+
+        os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        session_name = f"session_{phone.replace('+', '').replace('-', '')}"
+        session_path = os.path.join(config.SESSIONS_DIR, session_name)
+        client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+
+        try:
+            await client.connect()
+            if await client.is_user_authorized():
+                me = await client.get_me()
+                db.add_account(phone, session_name)
+                accounts = db.get_accounts()
+                acc_id = None
+                for a in accounts:
+                    if a["phone"] == phone:
+                        acc_id = a["id"]
+                        break
+                if acc_id:
+                    self.clients[acc_id] = client
+                return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
+
+            qr_login = await client.qr_login()
+            self._pending_qr[phone] = {
+                "client": client,
+                "qr_login": qr_login,
+                "session": session_name,
+                "owner_id": owner_id,
+                "bot": bot
+            }
+
+            if QR_AVAILABLE:
+                qr = qrcode.QRCode(version=1, box_size=10, border=4)
+                qr.add_data(qr_login.url)
+                qr.make(fit=True)
+                img = qr.make_image(fill_color="black", back_color="white")
+                buffer = BytesIO()
+                img.save(buffer, format='PNG')
+                buffer.seek(0)
+                return {"status": "qr_image", "phone": phone, "qr_buffer": buffer, "qr_url": qr_login.url}
+            else:
+                return {"status": "qr_url", "phone": phone, "qr_url": qr_login.url}
+
+        except Exception as e:
+            await client.disconnect()
+            return {"status": "error", "msg": str(e)}
+
+    async def wait_qr_login(self, phone: str):
+        """Ожидание QR-логина в фоновой задаче."""
+        pending = self._pending_qr.get(phone)
+        if not pending:
+            return
+
+        client = pending["client"]
+        qr_login = pending["qr_login"]
+        owner_id = pending["owner_id"]
+        bot = pending["bot"]
+        session_name = pending["session"]
+
+        try:
+            await qr_login.wait(timeout=180)
+            me = await client.get_me()
+            db.add_account(phone, session_name)
+            accounts = db.get_accounts()
+            acc_id = None
+            for a in accounts:
+                if a["phone"] == phone:
+                    acc_id = a["id"]
+                    break
+            if acc_id:
+                self.clients[acc_id] = client
+
+            from emoji_data import CHECK, EYES
+            await bot.send_message(
+                owner_id,
+                f"{CHECK} Аккаунт <b>{me.first_name}</b> ({phone}) добавлен через QR!\n{EYES} ID: {acc_id}",
+                parse_mode="HTML"
+            )
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            from emoji_data import CROSS
+            await bot.send_message(
+                owner_id,
+                f"{CROSS} Время ожидания QR-логина истекло (3 мин). Попробуйте снова.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await client.disconnect()
+            from emoji_data import CROSS
+            await bot.send_message(
+                owner_id,
+                f"{CROSS} Ошибка QR-входа: {str(e)[:200]}",
+                parse_mode="HTML"
+            )
+        finally:
+            if phone in self._pending_qr:
+                del self._pending_qr[phone]
+
+    async def import_session_file(self, phone: str, session_bytes: bytes, owner_id: int, bot) -> dict:
+        """Импорт готового .session файла."""
+        os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        session_name = f"session_{phone.replace('+', '').replace('-', '')}"
+        session_path = os.path.join(config.SESSIONS_DIR, session_name)
+
+        try:
+            with open(f"{session_path}.session", "wb") as f:
+                f.write(session_bytes)
+
+            client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+            await client.connect()
+
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                os.remove(f"{session_path}.session")
+                return {"status": "error", "msg": "Сессия не авторизована. Залейте валидный .session файл."}
+
+            me = await client.get_me()
+            db.add_account(phone, session_name)
+            accounts = db.get_accounts()
+            acc_id = None
+            for a in accounts:
+                if a["phone"] == phone:
+                    acc_id = a["id"]
+                    break
+            if acc_id:
+                self.clients[acc_id] = client
+            else:
+                await client.disconnect()
+
+            return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
+        except Exception as e:
+            if os.path.exists(f"{session_path}.session"):
+                os.remove(f"{session_path}.session")
+            return {"status": "error", "msg": str(e)}
+
 
     async def get_account_dialogs(self, account_id: int) -> List[Dict]:
         if account_id not in self.clients:
