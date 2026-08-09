@@ -1,10 +1,11 @@
 """Панель администратора (owner)"""
 import asyncio
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 from database import db
@@ -19,6 +20,9 @@ class AdminStates(StatesGroup):
     waiting_phone = State()
     waiting_code = State()
     waiting_password = State()
+    waiting_phone_qr = State()
+    waiting_phone_session = State()
+    waiting_session_file = State()
 
 
 def is_owner(user_id: int) -> bool:
@@ -43,12 +47,34 @@ async def cb_admin_panel(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
 
 
+# === ВЫБОР СПОСОБА ВХОДА ===
 @router.callback_query(F.data == "admin_add_account")
 async def cb_add_account(callback: CallbackQuery, state: FSMContext):
     if not is_owner(callback.from_user.id):
         return
-    text = f"{PLUS} <b>Добавление аккаунта</b>" + "\n\n" + f"{INFO} Введите номер телефона в формате +79991234567:"
-    await callback.message.edit_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
+    text = f"{PLUS} <b>Добавление аккаунта</b>" + "\n\n"
+    text += f"{INFO} Выберите способ входа:" + "\n\n"
+    text += f"{CHECK} <b>По коду</b> — бот отправит код в Telegram (может не работать, если вход с того же IP)" + "\n"
+    text += f"{QR} <b>По QR-коду</b> — сканируйте QR с телефона (рекомендуется)" + "\n"
+    text += f"{UPLOAD} <b>Загрузить .session</b> — загрузите готовый файл сессии"
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"{CHECK} По коду", callback_data="add_method_code")
+    builder.button(text=f"{QR} По QR-коду", callback_data="add_method_qr")
+    builder.button(text=f"{UPLOAD} .session файл", callback_data="add_method_session")
+    builder.button(text=f"{BACK} Назад", callback_data="admin_panel")
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+# === СПОСОБ 1: ПО КОДУ ===
+@router.callback_query(F.data == "add_method_code")
+async def cb_method_code(callback: CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        return
+    text = f"{CHECK} <b>Вход по коду</b>" + "\n\n"
+    text += f"{WARNING} <b>Внимание:</b> если бот и ваш Telegram на одном сервере/IP, вход заблокирует Telegram!" + "\n\n"
+    text += f"{INFO} Введите номер телефона в формате +79991234567:"
+    await callback.message.edit_text(text, reply_markup=back_kb("admin_add_account"), parse_mode="HTML")
     await state.set_state(AdminStates.waiting_phone)
 
 
@@ -61,7 +87,7 @@ async def process_phone(message: Message, state: FSMContext):
     result = await account_manager.add_account(phone)
     if result["status"] == "code_needed":
         text = f"{BELL} Код отправлен на {phone}." + "\n" + f"{INFO} Введите код из Telegram:"
-        await message.answer(text, reply_markup=back_kb("admin_panel"))
+        await message.answer(text, reply_markup=back_kb("admin_add_account"))
         await state.set_state(AdminStates.waiting_code)
     elif result["status"] == "success":
         text = f"{CHECK} Аккаунт <b>{result['name']}</b> ({phone}) успешно добавлен!" + "\n" + f"{EYES} ID: {result['id']}"
@@ -83,7 +109,7 @@ async def process_code(message: Message, state: FSMContext):
     result = await account_manager.add_account(phone, code=code)
     if result["status"] == "password_needed":
         text = f"{LOCK} Требуется пароль 2FA." + "\n" + f"{INFO} Введите пароль:"
-        await message.answer(text, reply_markup=back_kb("admin_panel"))
+        await message.answer(text, reply_markup=back_kb("admin_add_account"))
         await state.set_state(AdminStates.waiting_password)
     elif result["status"] == "success":
         text = f"{CHECK} Аккаунт <b>{result['name']}</b> успешно добавлен!" + "\n" + f"{EYES} ID: {result['id']}"
@@ -113,6 +139,112 @@ async def process_password(message: Message, state: FSMContext):
     await state.clear()
 
 
+# === СПОСОБ 2: QR-КОД ===
+@router.callback_query(F.data == "add_method_qr")
+async def cb_method_qr(callback: CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        return
+    text = f"{QR} <b>Вход по QR-коду</b>" + "\n\n"
+    text += f"{INFO} Введите номер телефона в формате +79991234567:" + "\n"
+    text += f"{WARNING} Бот сгенерирует QR — отсканируйте его с телефона через Telegram → Настройки → Устройства → Подключить."
+    await callback.message.edit_text(text, reply_markup=back_kb("admin_add_account"), parse_mode="HTML")
+    await state.set_state(AdminStates.waiting_phone_qr)
+
+
+@router.message(AdminStates.waiting_phone_qr)
+async def process_phone_qr(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        return
+    phone = message.text.strip()
+    await state.update_data(phone=phone)
+
+    result = await account_manager.start_qr_login(phone, message.from_user.id, message.bot)
+
+    if result["status"] == "success":
+        text = f"{CHECK} Аккаунт <b>{result['name']}</b> ({phone}) уже авторизован!" + "\n" + f"{EYES} ID: {result['id']}"
+        await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
+        await state.clear()
+    elif result["status"] == "qr_image":
+        buffer = result["qr_buffer"]
+        await message.answer_photo(
+            BufferedInputFile(buffer.read(), filename="qr.png"),
+            caption=f"{QR} <b>Отсканируйте QR-код</b>" + "\n\n"
+                    f"{INFO} Откройте Telegram на телефоне → Настройки → Устройства → Подключить устройство" + "\n"
+                    f"{WARNING} У вас есть 3 минуты!" + "\n\n"
+                    f"{LINK} Или перейдите по ссылке: {result['qr_url']}",
+            parse_mode="HTML"
+        )
+        # Запускаем ожидание в фоне
+        asyncio.create_task(account_manager.wait_qr_login(phone))
+        await state.clear()
+    elif result["status"] == "qr_url":
+        text = f"{QR} <b>Подключение по QR</b>" + "\n\n"
+        text += f"{LINK} <a href=\"{result['qr_url']}\">Нажмите здесь для подключения</a>" + "\n\n"
+        text += f"{WARNING} У вас есть 3 минуты!"
+        await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+        asyncio.create_task(account_manager.wait_qr_login(phone))
+        await state.clear()
+    else:
+        text = f"{CROSS} Ошибка: {result.get('msg', 'Неизвестная ошибка')}"
+        await message.answer(text, reply_markup=admin_panel_kb())
+        await state.clear()
+
+
+# === СПОСОБ 3: ЗАГРУЗКА .SESSION ===
+@router.callback_query(F.data == "add_method_session")
+async def cb_method_session(callback: CallbackQuery, state: FSMContext):
+    if not is_owner(callback.from_user.id):
+        return
+    text = f"{UPLOAD} <b>Загрузка .session файла</b>" + "\n\n"
+    text += f"{INFO} 1. Авторизуйтесь через Telethon на другом устройстве (компьютере)" + "\n"
+    text += f"{INFO} 2. Найдите файл <code>session_xxx.session</code> в папке проекта" + "\n"
+    text += f"{INFO} 3. Введите номер телефона этого аккаунта ниже, затем отправьте файл"
+    await callback.message.edit_text(text, reply_markup=back_kb("admin_add_account"), parse_mode="HTML")
+    await state.set_state(AdminStates.waiting_phone_session)
+
+
+@router.message(AdminStates.waiting_phone_session)
+async def process_phone_session(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        return
+    phone = message.text.strip()
+    await state.update_data(phone=phone)
+    text = f"{UPLOAD} Теперь отправьте <b>.session</b> файл для номера {phone}"
+    await message.answer(text, reply_markup=back_kb("admin_add_account"), parse_mode="HTML")
+    await state.set_state(AdminStates.waiting_session_file)
+
+
+@router.message(AdminStates.waiting_session_file)
+async def process_session_file(message: Message, state: FSMContext):
+    if not is_owner(message.from_user.id):
+        return
+    if not message.document or not message.document.file_name.endswith('.session'):
+        await message.answer(f"{CROSS} Отправьте файл с расширением <b>.session</b>", parse_mode="HTML")
+        return
+
+    data = await state.get_data()
+    phone = data.get("phone")
+    if not phone:
+        await message.answer(f"{CROSS} Номер телефона не найден. Начните заново.", reply_markup=admin_panel_kb())
+        await state.clear()
+        return
+
+    # Скачиваем файл
+    file = await message.bot.get_file(message.document.file_id)
+    file_bytes = await message.bot.download_file(file.file_path)
+
+    result = await account_manager.import_session_file(phone, file_bytes.read(), message.from_user.id, message.bot)
+
+    if result["status"] == "success":
+        text = f"{CHECK} Аккаунт <b>{result['name']}</b> ({phone}) импортирован!" + "\n" + f"{EYES} ID: {result['id']}"
+        await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
+    else:
+        text = f"{CROSS} Ошибка импорта: {result.get('msg', 'Неизвестная ошибка')}"
+        await message.answer(text, reply_markup=admin_panel_kb())
+    await state.clear()
+
+
+# === СПИСОК АККАУНТОВ ===
 @router.callback_query(F.data == "admin_accounts")
 async def cb_accounts_list(callback: CallbackQuery):
     if not is_owner(callback.from_user.id):
