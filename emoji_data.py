@@ -173,6 +173,14 @@ FLAG = PREMIUM_EMOJIS.get("🚩", "🚩")
 TADA = PREMIUM_EMOJIS.get("🎉", "🎉")
 
 
+
+# === ДОПОЛНИТЕЛЬНЫЕ АЛИАСЫ ===
+SEND = ENVELOPE
+FOLDER = BOOKMARK
+BACK = "⬅️"
+FORWARD = ARROW_RIGHT
+
+
 def get_emoji(emoji_char: str) -> str:
     """Получить премиум ID эмодзи по символу"""
     return PREMIUM_EMOJIS.get(emoji_char, emoji_char)
