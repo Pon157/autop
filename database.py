@@ -1,3 +1,4 @@
+import os
 """Работа с базой данных (SQLite)"""
 import sqlite3
 import asyncio
@@ -10,6 +11,7 @@ import config
 class Database:
     def __init__(self, db_path: str = config.DB_PATH):
         self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
         self.init_db()
 
     @contextmanager
