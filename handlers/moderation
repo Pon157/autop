@@ -1,5 +1,4 @@
 """Модерация постов — одобрение/отклонение"""
-import json
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
 
@@ -7,79 +6,50 @@ import config
 from database import db
 from keyboards import *
 from emoji_data import *
-from handlers.user import start_broadcast_setup
 
 router = Router()
 
 
 @router.callback_query(F.data.startswith("mod_approve_"))
 async def cb_mod_approve(callback: CallbackQuery):
-    """Owner одобрил пост"""
     if callback.from_user.id not in config.OWNER_IDS:
         await callback.answer(f"{STOP} Нет доступа!", show_alert=True)
         return
-
     post_id = int(callback.data.split("_")[-1])
     post = db.get_post(post_id)
-
     if not post:
         await callback.answer(f"{CROSS} Пост не найден", show_alert=True)
         return
-
     if post["status"] != "pending":
         await callback.answer(f"{INFO} Пост уже обработан", show_alert=True)
         return
-
     db.update_post_status(post_id, "approved")
-
-    # Уведомляем пользователя
     try:
-        await callback.bot.send_message(
-            post["user_id"],
-            f"{CHECK} <b>Ваш пост одобрен!</b>\n\n"
-            f"{ARROW_RIGHT} Теперь выберите аккаунты и чаты для рассылки.",
-            parse_mode="HTML"
-        )
-        # Открываем настройку рассылки
-        # (В реальном боте тут нужен FSM или inline кнопки для выбора)
+        text = f"{CHECK} <b>Ваш пост одобрен!</b>" + "\n\n"
+        text += f"{ARROW_RIGHT} Теперь выберите аккаунты и чаты для рассылки."
+        await callback.bot.send_message(post["user_id"], text, parse_mode="HTML")
     except Exception as e:
         print(f"[Moderation] Ошибка уведомления пользователя: {e}")
-
-    await callback.message.edit_text(
-        f"{CHECK} <b>Пост #{post_id} одобрен</b>\n"
-        f"{EYES} Пользователь уведомлен.",
-        parse_mode="HTML"
-    )
+    text = f"{CHECK} <b>Пост #{post_id} одобрен</b>" + "\n"
+    text += f"{EYES} Пользователь уведомлен."
+    await callback.message.edit_text(text, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("mod_reject_"))
 async def cb_mod_reject(callback: CallbackQuery):
-    """Owner отклонил пост"""
     if callback.from_user.id not in config.OWNER_IDS:
         await callback.answer(f"{STOP} Нет доступа!", show_alert=True)
         return
-
     post_id = int(callback.data.split("_")[-1])
     post = db.get_post(post_id)
-
     if not post:
         await callback.answer(f"{CROSS} Пост не найден", show_alert=True)
         return
-
     db.update_post_status(post_id, "rejected")
-
-    # Уведомляем пользователя
     try:
-        await callback.bot.send_message(
-            post["user_id"],
-            f"{CROSS} <b>Ваш пост отклонен</b>\n\n"
-            f"{INFO} Обратитесь к администратору для уточнения причин.",
-            parse_mode="HTML"
-        )
+        text = f"{CROSS} <b>Ваш пост отклонен</b>" + "\n\n"
+        text += f"{INFO} Обратитесь к администратору для уточнения причин."
+        await callback.bot.send_message(post["user_id"], text, parse_mode="HTML")
     except Exception as e:
         print(f"[Moderation] Ошибка уведомления: {e}")
-
-    await callback.message.edit_text(
-        f"{CROSS} <b>Пост #{post_id} отклонен</b>",
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(f"{CROSS} <b>Пост #{post_id} отклонен</b>", parse_mode="HTML")
