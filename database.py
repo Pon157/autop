@@ -1,6 +1,7 @@
 """Работа с базой данных (SQLite)"""
 import os
 import sqlite3
+import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from contextlib import contextmanager
@@ -47,7 +48,6 @@ class Database:
                     premium_until TIMESTAMP DEFAULT NULL
                 )
             """)
-            # Миграции
             for col in ["api_id", "api_hash"]:
                 try:
                     cursor.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT DEFAULT NULL")
@@ -221,6 +221,21 @@ class Database:
                 cursor.execute("UPDATE pending_posts SET status = ?, channel_message_id = ? WHERE id = ?", (status, channel_message_id, post_id))
             else:
                 cursor.execute("UPDATE pending_posts SET status = ? WHERE id = ?", (status, post_id))
+
+    def update_post_accounts(self, post_id: int, accounts: list):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE pending_posts SET selected_accounts = ? WHERE id = ?", (json.dumps(accounts), post_id))
+
+    def update_post_folders(self, post_id: int, folders: list):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE pending_posts SET selected_folders = ? WHERE id = ?", (json.dumps(folders), post_id))
+
+    def update_post_chats(self, post_id: int, chats: list):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE pending_posts SET selected_chats = ? WHERE id = ?", (json.dumps(chats), post_id))
 
     def get_user_posts(self, user_id: int) -> List[Dict]:
         with self._connect() as conn:
