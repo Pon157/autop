@@ -24,7 +24,7 @@ class AccountManager:
         self.flood_waits: Dict[int, int] = {}
         self._code_hashes: Dict[str, str] = {}
         self._pending_qr: Dict[str, dict] = {}
-        self._pending_auth: Dict[str, dict] = {}   # phone → {client, ...}
+        self._pending_auth: Dict[str, dict] = {}
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
@@ -254,7 +254,6 @@ class AccountManager:
             del self._pending_qr[phone]
             return
 
-        # Успешная авторизация (QR или QR+пароль)
         try:
             me = await client.get_me()
             db.add_account(phone, session_name, api_id, api_hash)
@@ -353,14 +352,28 @@ class AccountManager:
             return {"status": "error", "msg": str(e)}
 
     async def get_account_dialogs(self, account_id: int) -> List[Dict]:
+        """Получает диалоги аккаунта через iter_dialogs."""
         if account_id not in self.clients:
             return []
         client = self.clients[account_id]
         try:
-            dialogs = await client(GetDialogsRequest(offset_date=None, offset_id=0, offset_peer=InputPeerEmpty(), limit=200, hash=0))
-            return [{"id": d.id, "title": d.title, "type": "channel" if hasattr(d, "broadcast") and d.broadcast else "chat"} for d in dialogs.chats]
+            dialogs = []
+            async for dialog in client.iter_dialogs(limit=200):
+                title = dialog.title or dialog.name or str(dialog.id)
+                if dialog.is_channel:
+                    chat_type = "channel"
+                elif dialog.is_group:
+                    chat_type = "group"
+                else:
+                    chat_type = "user"
+                dialogs.append({
+                    "id": dialog.id,
+                    "title": title,
+                    "type": chat_type
+                })
+            return dialogs
         except Exception as e:
-            print(f"[Dialogs Error] {e}")
+            print(f"[Dialogs Error] Account {account_id}: {e}")
             return []
 
     async def forward_post(self, account_id: int, from_chat: int, message_id: int, to_chat: int) -> Dict:
