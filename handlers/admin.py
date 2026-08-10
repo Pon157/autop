@@ -32,13 +32,14 @@ def is_owner(user_id: int) -> bool:
     return user_id in config.OWNER_IDS
 
 
-# === ГЛАВНЫЕ ОБРАБОТЧИКИ ===
+# === ГЛАВНАЯ ПАНЕЛЬ ===
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_owner(message.from_user.id):
         await message.answer(f"{STOP} Доступ запрещен.")
         return
-    await show_admin_panel(message.answer, message.from_user.id)
+    text = f"{GEAR} <b>Админ панель</b>" + NL + NL + f"{EYES} Управление аккаунтами и статистикой."
+    await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "menu_admin")
@@ -46,48 +47,24 @@ async def cb_menu_admin(callback: CallbackQuery):
     if not is_owner(callback.from_user.id):
         await callback.answer(f"{STOP} Нет доступа!", show_alert=True)
         return
-    await show_admin_panel(callback.message.edit_text, callback.from_user.id)
+    text = f"{GEAR} <b>Админ панель</b>" + NL + NL + f"{EYES} Управление аккаунтами и статистикой."
+    await callback.message.edit_text(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel_alias(callback: CallbackQuery):
-    """Alias для кнопок 'Назад' которые используют admin_panel"""
     await cb_menu_admin(callback)
 
 
-async def show_admin_panel(send_fn, user_id: int):
-    text = f"{GEAR} <b>Админ панель</b>" + NL + NL + f"{EYES} Управление аккаунтами и статистикой."
-    await send_fn(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
-
-
-# === API НАСТРОЙКИ ===
-@router.callback_query(F.data == "admin_api_settings")
-async def cb_api_settings(callback: CallbackQuery):
+# === ДОБАВЛЕНИЕ АККАУНТА: API_ID → API_HASH → СПОСОБ → НОМЕР → КОД → ПАРОЛЬ ===
+@router.callback_query(F.data == "admin_add_account")
+async def cb_add_account(callback: CallbackQuery, state: FSMContext):
     if not is_owner(callback.from_user.id):
         return
-    api_id, api_hash = db.get_api_credentials()
-    source = "из БД" if db.get_setting("api_id") else "из .env (fallback)"
-    text = f"{GEAR} <b>API настройки</b>" + NL + NL
-    text += f"{INFO} Источник: <b>{source}</b>" + NL
-    text += f"{EYES} API_ID: <code>{api_id or 'не задан'}</code>" + NL
-    text += f"{EYES} API_HASH: <code>{api_hash[:8] + '...' if api_hash else 'не задан'}</code>" + NL + NL
-    text += f"{WARNING} Эти данные нужны для работы Telethon. Получите на my.telegram.org"
-    builder = InlineKeyboardBuilder()
-    builder.button(text=f"{PENCIL} Изменить API_ID", callback_data="set_api_id")
-    builder.button(text=f"{PENCIL} Изменить API_HASH", callback_data="set_api_hash")
-    builder.button(text=f"{BACK} Назад", callback_data="admin_panel")
-    builder.adjust(1)
-    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
-
-
-@router.callback_query(F.data == "set_api_id")
-async def cb_set_api_id(callback: CallbackQuery, state: FSMContext):
-    if not is_owner(callback.from_user.id):
-        return
-    text = f"{PENCIL} <b>Введите API_ID</b>" + NL + NL
-    text += f"{INFO} Получите на <a href=\"https://my.telegram.org/apps\">my.telegram.org</a>" + NL
-    text += f"{WARNING} Только цифры, например: <code>123456</code>"
-    await callback.message.edit_text(text, reply_markup=back_kb("admin_api_settings"), parse_mode="HTML", disable_web_page_preview=True)
+    text = f"{PLUS} <b>Добавление аккаунта</b>" + NL + NL
+    text += f"{INFO} Введите <b>API_ID</b> для этого аккаунта (только цифры):" + NL
+    text += f"{WARNING} Получите на <a href=\"https://my.telegram.org/apps\">my.telegram.org</a>"
+    await callback.message.edit_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML", disable_web_page_preview=True)
     await state.set_state(AdminStates.waiting_api_id)
 
 
@@ -97,27 +74,12 @@ async def process_api_id(message: Message, state: FSMContext):
         return
     val = message.text.strip()
     if not val.isdigit():
-        await message.answer(f"{CROSS} API_ID должен содержать только цифры.", reply_markup=back_kb("admin_api_settings"))
+        await message.answer(f"{CROSS} API_ID только цифры. Попробуйте снова:", reply_markup=back_kb("admin_panel"))
         return
-    db.set_setting("api_id", val)
-    text = f"{CHECK} API_ID сохранен: <code>{val}</code>" + NL + NL
-    api_hash = db.get_setting("api_hash")
-    if not api_hash:
-        text += f"{WARNING} Теперь введите API_HASH через админ-панель."
-    else:
-        text += f"{INFO} API_HASH уже задан. Можно добавлять аккаунты."
-    await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
-    await state.clear()
-
-
-@router.callback_query(F.data == "set_api_hash")
-async def cb_set_api_hash(callback: CallbackQuery, state: FSMContext):
-    if not is_owner(callback.from_user.id):
-        return
-    text = f"{PENCIL} <b>Введите API_HASH</b>" + NL + NL
-    text += f"{INFO} Получите на <a href=\"https://my.telegram.org/apps\">my.telegram.org</a>" + NL
-    text += f"{WARNING} Строка из букв и цифр, например: <code>a1b2c3d4e5f6...</code>"
-    await callback.message.edit_text(text, reply_markup=back_kb("admin_api_settings"), parse_mode="HTML", disable_web_page_preview=True)
+    await state.update_data(api_id=val)
+    text = f"{CHECK} API_ID: <code>{val}</code>" + NL + NL
+    text += f"{INFO} Теперь введите <b>API_HASH</b>:"
+    await message.answer(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
     await state.set_state(AdminStates.waiting_api_hash)
 
 
@@ -127,85 +89,28 @@ async def process_api_hash(message: Message, state: FSMContext):
         return
     val = message.text.strip()
     if len(val) < 10:
-        await message.answer(f"{CROSS} API_HASH слишком короткий.", reply_markup=back_kb("admin_api_settings"))
-        return
-    db.set_setting("api_hash", val)
-    text = f"{CHECK} API_HASH сохранен." + NL + NL
-    api_id = db.get_setting("api_id")
-    if not api_id:
-        text += f"{WARNING} Теперь введите API_ID через админ-панель."
-    else:
-        text += f"{INFO} API_ID уже задан. Можно добавлять аккаунты."
-    await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
-    await state.clear()
-
-
-# === ДОБАВЛЕНИЕ АККАУНТА — СНАЧАЛА API ===
-@router.callback_query(F.data == "admin_add_account")
-async def cb_add_account(callback: CallbackQuery, state: FSMContext):
-    if not is_owner(callback.from_user.id):
-        return
-    text = f"{PLUS} <b>Добавление аккаунта</b>" + NL + NL
-    text += f"{INFO} Сначала введите API_ID и API_HASH для этого аккаунта." + NL
-    text += f"{WARNING} Каждый аккаунт должен иметь <b>свои</b> API credentials — так Telegram не банит." + NL + NL
-    text += f"{INFO} Введите API_ID (только цифры):"
-    await callback.message.edit_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
-    await state.set_state(AdminStates.waiting_api_id)
-    await state.update_data(add_account_flow=True)
-
-
-@router.message(AdminStates.waiting_api_id)
-async def process_add_api_id(message: Message, state: FSMContext):
-    if not is_owner(message.from_user.id):
-        return
-    data = await state.get_data()
-    if not data.get("add_account_flow"):
-        # Это обычный ввод API_ID из настроек — делегируем
-        await process_api_id(message, state)
-        return
-    val = message.text.strip()
-    if not val.isdigit():
-        await message.answer(f"{CROSS} API_ID только цифры.", reply_markup=back_kb("admin_panel"))
-        return
-    await state.update_data(api_id=val)
-    text = f"{CHECK} API_ID: <code>{val}</code>" + NL + NL
-    text += f"{INFO} Теперь введите API_HASH:"
-    await message.answer(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
-    await state.set_state(AdminStates.waiting_api_hash)
-
-
-@router.message(AdminStates.waiting_api_hash)
-async def process_add_api_hash(message: Message, state: FSMContext):
-    if not is_owner(message.from_user.id):
-        return
-    data = await state.get_data()
-    if not data.get("add_account_flow"):
-        await process_api_hash(message, state)
-        return
-    val = message.text.strip()
-    if len(val) < 10:
-        await message.answer(f"{CROSS} API_HASH слишком короткий.", reply_markup=back_kb("admin_panel"))
+        await message.answer(f"{CROSS} API_HASH слишком короткий. Попробуйте снова:", reply_markup=back_kb("admin_panel"))
         return
     await state.update_data(api_hash=val)
-    text = f"{CHECK} API сохранены для нового аккаунта." + NL + NL
+    text = f"{CHECK} API сохранены." + NL + NL
     text += f"{INFO} Выберите способ входа:"
     builder = InlineKeyboardBuilder()
-    builder.button(text=f"{CHECK} По коду", callback_data="add_method_code")
-    builder.button(text=f"{QR} По QR-коду", callback_data="add_method_qr")
-    builder.button(text=f"{UPLOAD} .session файл", callback_data="add_method_session")
+    builder.button(text=f"{CHECK} По коду (SMS/пуш)", callback_data="add_method_code")
+    builder.button(text=f"{QR} По QR-коду (рекомендуется)", callback_data="add_method_qr")
+    builder.button(text=f"{UPLOAD} Загрузить .session", callback_data="add_method_session")
     builder.button(text=f"{BACK} Назад", callback_data="admin_panel")
     builder.adjust(1)
     await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 
-# === СПОСОБЫ ВХОДА ===
+# === СПОСОБ 1: ПО КОДУ ===
 @router.callback_query(F.data == "add_method_code")
 async def cb_method_code(callback: CallbackQuery, state: FSMContext):
     if not is_owner(callback.from_user.id):
         return
     text = f"{CHECK} <b>Вход по коду</b>" + NL + NL
-    text += f"{WARNING} <b>Внимание:</b> если бот и ваш Telegram на одном сервере/IP, вход заблокирует Telegram!" + NL + NL
-    text += f"{INFO} Введите номер телефона в формате +79991234567:"
+    text += f"{WARNING} Если бот и ваш Telegram на одном IP, вход заблокирует Telegram!" + NL + NL
+    text += f"{INFO} Введите номер телефона (+79991234567):"
     await callback.message.edit_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
     await state.set_state(AdminStates.waiting_phone)
 
@@ -272,12 +177,13 @@ async def process_password(message: Message, state: FSMContext):
     await state.clear()
 
 
+# === СПОСОБ 2: QR ===
 @router.callback_query(F.data == "add_method_qr")
 async def cb_method_qr(callback: CallbackQuery, state: FSMContext):
     if not is_owner(callback.from_user.id):
         return
     text = f"{QR} <b>Вход по QR-коду</b>" + NL + NL
-    text += f"{INFO} Введите номер телефона в формате +79991234567:"
+    text += f"{INFO} Введите номер телефона (+79991234567):"
     await callback.message.edit_text(text, reply_markup=back_kb("admin_panel"), parse_mode="HTML")
     await state.set_state(AdminStates.waiting_phone_qr)
 
@@ -297,9 +203,9 @@ async def process_phone_qr(message: Message, state: FSMContext):
     elif result["status"] == "qr_image":
         buffer = result["qr_buffer"]
         caption = f"{QR} <b>Отсканируйте QR-код</b>" + NL + NL
-        caption += f"{INFO} Откройте Telegram -> Настройки -> Устройства -> Подключить устройство" + NL
+        caption += f"{INFO} Telegram -> Настройки -> Устройства -> Подключить" + NL
         caption += f"{WARNING} У вас есть 3 минуты!" + NL + NL
-        caption += f"{LINK} Или ссылка: {result['qr_url']}"
+        caption += f"{LINK} Ссылка: {result['qr_url']}"
         await message.answer_photo(BufferedInputFile(buffer.read(), filename="qr.png"), caption=caption, parse_mode="HTML")
         asyncio.create_task(account_manager.wait_qr_login(phone))
         await state.clear()
@@ -316,6 +222,7 @@ async def process_phone_qr(message: Message, state: FSMContext):
         await state.clear()
 
 
+# === СПОСОБ 3: .SESSION ===
 @router.callback_query(F.data == "add_method_session")
 async def cb_method_session(callback: CallbackQuery, state: FSMContext):
     if not is_owner(callback.from_user.id):
