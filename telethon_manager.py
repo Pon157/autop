@@ -24,6 +24,7 @@ class AccountManager:
         self.flood_waits: Dict[int, int] = {}
         self._code_hashes: Dict[str, str] = {}
         self._pending_qr: Dict[str, dict] = {}
+        self._pending_auth: Dict[str, dict] = {}   # ← НОВОЕ: phone → {client, ...}
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
@@ -93,7 +94,20 @@ class AccountManager:
                     await client.sign_in(phone, code, phone_code_hash=pch)
                 except SessionPasswordNeededError:
                     if not password:
-                        return {"status": "password_needed", "phone": phone, "session": session_name, "api_id": aid, "api_hash": ahash}
+                        # ← НОВОЕ: сохраняем клиент, чтобы потом ввести пароль в том же соединении
+                        self._pending_auth[phone] = {
+                            "client": client,
+                            "session_name": session_name,
+                            "api_id": str(aid),
+                            "api_hash": ahash
+                        }
+                        return {
+                            "status": "password_needed",
+                            "phone": phone,
+                            "session": session_name,
+                            "api_id": aid,
+                            "api_hash": ahash
+                        }
                     await client.sign_in(password=password)
                 except (PhoneCodeInvalidError, PhoneCodeExpiredError):
                     return {"status": "error", "msg": "Неверный или просроченный код"}
@@ -112,6 +126,40 @@ class AccountManager:
         except Exception as e:
             await client.disconnect()
             return {"status": "error", "msg": str(e)}
+
+    async def complete_password_login(self, phone: str, password: str) -> Dict:
+        """Завершает вход по коду, когда требуется 2FA-пароль."""
+        pending = self._pending_auth.get(phone)
+        if not pending:
+            return {"status": "error", "msg": "Сессия устарела. Начните заново."}
+
+        client = pending["client"]
+        session_name = pending["session_name"]
+        api_id = pending["api_id"]
+        api_hash = pending["api_hash"]
+
+        try:
+            await client.sign_in(password=password)
+            me = await client.get_me()
+            db.add_account(phone, session_name, api_id, api_hash)
+
+            acc_id = None
+            for a in db.get_accounts():
+                if a["phone"] == phone:
+                    acc_id = a["id"]
+                    break
+
+            if acc_id:
+                self.clients[acc_id] = client
+            else:
+                await client.disconnect()
+
+            return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
+        except Exception as e:
+            await client.disconnect()
+            return {"status": "error", "msg": str(e)}
+        finally:
+            self._pending_auth.pop(phone, None)
 
     async def start_qr_login(self, phone: str, owner_id: int, bot, api_id: str = None, api_hash: str = None) -> dict:
         try:
