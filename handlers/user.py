@@ -1,7 +1,6 @@
 """Панель пользователя — рассылка постов"""
 import json
 import asyncio
-import re
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -17,6 +16,8 @@ from emoji_data import *
 
 router = Router()
 
+CHATS_PER_PAGE = 10
+
 
 class UserStates(StatesGroup):
     waiting_post = State()
@@ -27,7 +28,7 @@ class UserStates(StatesGroup):
 class BroadcastSetup(StatesGroup):
     selecting_accounts = State()
     selecting_folders = State()
-    entering_chats = State()
+    selecting_chats = State()
     confirm = State()
 
 
@@ -165,7 +166,6 @@ def _build_accounts_kb(post_id: int, accounts: list, selected: list):
     return builder.as_markup()
 
 
-# ТОЧНЫЙ ФИЛЬТР: setup_acc_число_число (не ловит setup_acc_done)
 @router.callback_query(F.data.regexp(r"^setup_acc_\d+_\d+$"))
 async def cb_setup_account(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
@@ -210,11 +210,7 @@ async def cb_setup_acc_done(callback: CallbackQuery, state: FSMContext):
         text += f"{INFO} Можно пропустить этот шаг."
         await callback.message.edit_text(text, reply_markup=_build_folders_kb(post_id, folders, []), parse_mode="HTML")
     else:
-        await state.set_state(BroadcastSetup.entering_chats)
-        text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
-        text += f"{INFO} Отправьте ID чатов или @username через запятую:" + "\n"
-        text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>"
-        await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+        await _go_to_chat_selection(callback, state, post_id)
 
 
 def _build_folders_kb(post_id: int, folders: list, selected: list):
@@ -229,7 +225,6 @@ def _build_folders_kb(post_id: int, folders: list, selected: list):
     return builder.as_markup()
 
 
-# ТОЧНЫЙ ФИЛЬТР: setup_fold_число_число
 @router.callback_query(F.data.regexp(r"^setup_fold_\d+_\d+$"))
 async def cb_setup_folder(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
@@ -261,6 +256,7 @@ async def cb_setup_fold_done(callback: CallbackQuery, state: FSMContext):
     selected = data.get("selected_folders", [])
     db.update_post_folders(post_id, selected)
 
+    # Собираем чаты из папок
     chat_ids = []
     folders = db.get_folders(callback.from_user.id)
     for folder in folders:
@@ -268,39 +264,172 @@ async def cb_setup_fold_done(callback: CallbackQuery, state: FSMContext):
             chat_ids.extend(json.loads(folder["chat_ids"]))
 
     await state.update_data(selected_chats=chat_ids)
-    await state.set_state(BroadcastSetup.entering_chats)
-
-    text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
-    if chat_ids:
-        text += f"{CHECK} Из папок уже выбрано: <b>{len(chat_ids)}</b> чатов." + "\n"
-    text += f"{INFO} Отправьте дополнительные ID чатов или @username через запятую:" + "\n"
-    text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>" + "\n\n"
-    text += f"{INFO} Если дополнительных чатов не нужно — отправьте <code>-</code>"
-    await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+    await _go_to_chat_selection(callback, state, post_id)
 
 
 @router.callback_query(F.data.startswith("setup_fold_skip_"))
 async def cb_setup_fold_skip(callback: CallbackQuery, state: FSMContext):
     post_id = int(callback.data.split("_")[-1])
     db.update_post_folders(post_id, [])
-    await state.set_state(BroadcastSetup.entering_chats)
-    text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
-    text += f"{INFO} Отправьте ID чатов или @username через запятую:" + "\n"
-    text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>"
-    await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+    await _go_to_chat_selection(callback, state, post_id)
 
 
-@router.message(BroadcastSetup.entering_chats)
-async def process_chats(message: Message, state: FSMContext):
+async def _go_to_chat_selection(callback: CallbackQuery, state: FSMContext, post_id: int):
+    data = await state.get_data()
+    selected_accounts = data.get("selected_accounts", [])
+    folder_chats = data.get("selected_chats", [])
+
+    # Получаем диалоги со всех выбранных аккаунтов
+    all_dialogs = []
+    seen_ids = set()
+    for acc_id in selected_accounts:
+        dialogs = await account_manager.get_account_dialogs(acc_id)
+        for d in dialogs:
+            if d["id"] not in seen_ids:
+                seen_ids.add(d["id"])
+                all_dialogs.append(d)
+
+    if not all_dialogs:
+        # Fallback: ручной ввод
+        await state.set_state(BroadcastSetup.selecting_chats)
+        text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
+        text += f"{INFO} Не удалось получить диалоги с аккаунтов." + "\n"
+        text += f"{INFO} Введите ID чатов или @username через запятую:" + "\n"
+        text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>"
+        await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+        return
+
+    await state.update_data(available_chats=all_dialogs, selected_chats=folder_chats, chat_page=0)
+    await state.set_state(BroadcastSetup.selecting_chats)
+
+    text = f"{SPEECH} <b>Шаг 3/3: Выберите чаты</b>" + "\n\n"
+    text += f"{INFO} Нажмите на чат, чтобы выбрать/убрать." + "\n"
+    text += f"{INFO} Найдено чатов: <b>{len(all_dialogs)}</b>"
+    if folder_chats:
+        text += f"\n{CHECK} Уже выбрано из папок: <b>{len(folder_chats)}</b>"
+    await callback.message.edit_text(text, reply_markup=_build_chats_kb(post_id, all_dialogs, folder_chats, 0), parse_mode="HTML")
+
+
+def _build_chats_kb(post_id: int, chats: list, selected: list, page: int):
+    builder = InlineKeyboardBuilder()
+    start = page * CHATS_PER_PAGE
+    end = start + CHATS_PER_PAGE
+    page_chats = chats[start:end]
+
+    for i, chat in enumerate(page_chats):
+        idx = start + i
+        mark = CHECK if chat["id"] in selected else "⭕"
+        chat_type_emoji = {"channel": "📢", "group": "👥", "user": "👤"}.get(chat["type"], "💬")
+        title = chat["title"][:28] if len(chat["title"]) <= 28 else chat["title"][:25] + "..."
+        builder.button(text=f"{mark} {chat_type_emoji} {title}", callback_data=f"setup_chat_{post_id}_{idx}")
+
+    # Навигация
+    nav_row = []
+    if page > 0:
+        nav_row.append((f"{BACK} Назад", f"setup_chat_page_{post_id}_{page-1}"))
+    if end < len(chats):
+        nav_row.append((f"{ARROW_RIGHT} Вперёд", f"setup_chat_page_{post_id}_{page+1}"))
+    for text, data in nav_row:
+        builder.button(text=text, callback_data=data)
+
+    builder.button(text=f"{CHECK} Готово ({len(selected)} чатов)", callback_data=f"setup_chat_done_{post_id}")
+    builder.button(text=f"{BACK} Назад", callback_data=f"setup_fold_done_{post_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.regexp(r"^setup_chat_\d+_\d+$"))
+async def cb_setup_chat(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    post_id = int(parts[2])
+    idx = int(parts[3])
+
+    data = await state.get_data()
+    chats = data.get("available_chats", [])
+    selected = data.get("selected_chats", [])
+    page = data.get("chat_page", 0)
+
+    if idx >= len(chats):
+        await callback.answer("Ошибка")
+        return
+
+    chat_id = chats[idx]["id"]
+    if chat_id in selected:
+        selected.remove(chat_id)
+    else:
+        selected.append(chat_id)
+
+    await state.update_data(selected_chats=selected)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_build_chats_kb(post_id, chats, selected, page))
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^setup_chat_page_\d+_\d+$"))
+async def cb_setup_chat_page(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    post_id = int(parts[3])
+    page = int(parts[4])
+
+    data = await state.get_data()
+    chats = data.get("available_chats", [])
+    selected = data.get("selected_chats", [])
+
+    await state.update_data(chat_page=page)
+
+    try:
+        await callback.message.edit_text(
+            f"{SPEECH} <b>Шаг 3/3: Выберите чаты</b> (стр. {page+1})\n\n"
+            f"{INFO} Нажмите на чат, чтобы выбрать/убрать.",
+            reply_markup=_build_chats_kb(post_id, chats, selected, page),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setup_chat_done_"))
+async def cb_setup_chat_done(callback: CallbackQuery, state: FSMContext):
+    post_id = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    selected = data.get("selected_chats", [])
+
+    if not selected:
+        await callback.answer(f"{WARNING} Выберите хотя бы один чат!", show_alert=True)
+        return
+
+    db.update_post_chats(post_id, selected)
+    await state.set_state(BroadcastSetup.confirm)
+
+    post = db.get_post(post_id)
+    accounts = json.loads(post["selected_accounts"])
+    chats_count = len(selected)
+
+    text = f"{CHART} <b>Подтверждение рассылки #{post_id}</b>" + "\n\n"
+    text += f"{EYES} Аккаунтов: <b>{len(accounts)}</b>" + "\n"
+    text += f"{SPEECH} Чатов: <b>{chats_count}</b>" + "\n\n"
+    text += f"{INFO} Запустить рассылку?"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"{PLAY} Запустить", callback_data=f"post_start_{post_id}")
+    builder.button(text=f"{BACK} Назад", callback_data="menu_my_posts")
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+# Fallback: ручной ввод чатов (если диалоги не получены)
+@router.message(BroadcastSetup.selecting_chats)
+async def process_chats_manual(message: Message, state: FSMContext):
     data = await state.get_data()
     post_id = data.get("post_id")
     existing_chats = data.get("selected_chats", [])
 
     raw = message.text.strip()
-    if raw == "-":
-        new_chats = []
-    else:
-        new_chats = [c.strip() for c in raw.split(",") if c.strip()]
+    new_chats = [c.strip() for c in raw.split(",") if c.strip()]
 
     all_chats = existing_chats + new_chats
     if not all_chats:
@@ -381,7 +510,7 @@ async def cb_post_delete(callback: CallbackQuery):
     await cb_my_posts(callback)
 
 
-# === ПАПКИ ===
+# === ПАПКИ (с проверкой премиума на редактирование) ===
 @router.callback_query(F.data == "menu_folders")
 async def cb_folders(callback: CallbackQuery):
     folders = db.get_folders(callback.from_user.id)
@@ -422,6 +551,54 @@ async def cb_folder_view(callback: CallbackQuery):
     for chat in chats[:10]:
         text += f"   • {chat}" + "\n"
     await callback.message.edit_text(text, reply_markup=folder_detail_kb(folder_id), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("folder_edit_"))
+async def cb_folder_edit(callback: CallbackQuery, state: FSMContext):
+    # ПРОВЕРКА ПРЕМИУМА
+    if not db.is_premium_active(callback.from_user.id):
+        await callback.answer(f"{STOP} Редактирование папок доступно только в Премиум!", show_alert=True)
+        return
+
+    folder_id = int(callback.data.split("_")[-1])
+    folders = db.get_folders(callback.from_user.id)
+    folder = next((f for f in folders if f["id"] == folder_id), None)
+    if not folder:
+        await callback.answer(f"{CROSS} Папка не найдена", show_alert=True)
+        return
+
+    await state.update_data(edit_folder_id=folder_id)
+    text = f"{PENCIL} <b>Редактирование папки '{folder['name']}'</b>" + "\n\n"
+    text += f"{INFO} Отправьте ID чатов или @username через запятую:" + "\n"
+    text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>" + "\n\n"
+    current = json.loads(folder["chat_ids"])
+    if current:
+        text += f"{INFO} Текущие чаты: <code>{', '.join(map(str, current))}</code>"
+    await callback.message.edit_text(text, reply_markup=back_kb(f"folder_view_{folder_id}"), parse_mode="HTML")
+    await state.set_state(UserStates.editing_folder)
+
+
+@router.message(UserStates.editing_folder)
+async def process_edit_folder(message: Message, state: FSMContext):
+    if not db.is_premium_active(message.from_user.id):
+        await message.answer(f"{STOP} Только для Премиум!", reply_markup=main_menu_kb())
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    folder_id = data.get("edit_folder_id")
+    if not folder_id:
+        await message.answer(f"{CROSS} Ошибка. Начните заново.")
+        await state.clear()
+        return
+
+    raw = message.text.strip()
+    chats = [c.strip() for c in raw.split(",") if c.strip()]
+    db.update_folder_chats(folder_id, chats)
+
+    text = f"{CHECK} Папка обновлена! Чатов: <b>{len(chats)}</b>"
+    await message.answer(text, reply_markup=main_menu_kb(db.is_premium_active(message.from_user.id)), parse_mode="HTML")
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("folder_delete_"))
