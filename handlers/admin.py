@@ -144,7 +144,7 @@ async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
     code = message.text.strip()
-    await state.update_data(code=code)          # ← сохраняем код
+    await state.update_data(code=code)
     result = await account_manager.add_account(
         phone, code=code,
         api_id=data.get("api_id"), api_hash=data.get("api_hash")
@@ -170,10 +170,7 @@ async def process_password(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
     password = message.text.strip()
-
-    # ← ИСПРАВЛЕНО: используем открытое соединение, а не создаём новое
     result = await account_manager.complete_password_login(phone, password)
-
     if result["status"] == "success":
         text = f"{CHECK} Аккаунт <b>{result['name']}</b> добавлен!" + NL + f"{EYES} ID: {result['id']}"
         await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
@@ -226,6 +223,35 @@ async def process_phone_qr(message: Message, state: FSMContext):
         text = f"{CROSS} Ошибка: {result.get('msg', 'Неизвестная ошибка')}"
         await message.answer(text, reply_markup=admin_panel_kb())
         await state.clear()
+
+
+# === ОБРАБОТЧИК /password ДЛЯ QR-2FA ===
+@router.message(Command("password"))
+async def cmd_password(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(f"{WARNING} Введите: /password ваш_пароль")
+        return
+    password = parts[1].strip()
+
+    # Ищем pending QR по owner_id
+    found_phone = None
+    for phone, pending in account_manager._pending_qr.items():
+        if pending.get("owner_id") == message.from_user.id and pending.get("needs_password"):
+            found_phone = phone
+            break
+
+    if not found_phone:
+        await message.answer(f"{CROSS} Нет ожидающих авторизаций с 2FA.")
+        return
+
+    result = await account_manager.complete_qr_password_login(found_phone, password)
+    if result["status"] == "success":
+        await message.answer(f"{CHECK} Аккаунт добавлен!", reply_markup=admin_panel_kb())
+    else:
+        await message.answer(f"{CROSS} Ошибка: {result.get('msg', 'Неизвестная ошибка')}", reply_markup=admin_panel_kb())
 
 
 # === СПОСОБ 3: .SESSION ===
