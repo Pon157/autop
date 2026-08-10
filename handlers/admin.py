@@ -144,7 +144,11 @@ async def process_code(message: Message, state: FSMContext):
     data = await state.get_data()
     phone = data["phone"]
     code = message.text.strip()
-    result = await account_manager.add_account(phone, code=code, api_id=data.get("api_id"), api_hash=data.get("api_hash"))
+    await state.update_data(code=code)          # ← сохраняем код
+    result = await account_manager.add_account(
+        phone, code=code,
+        api_id=data.get("api_id"), api_hash=data.get("api_hash")
+    )
     if result["status"] == "password_needed":
         text = f"{LOCK} Требуется пароль 2FA." + NL + f"{INFO} Введите пароль:"
         await message.answer(text, reply_markup=back_kb("admin_panel"))
@@ -165,9 +169,11 @@ async def process_password(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     phone = data["phone"]
-    code = data.get("code", "")
     password = message.text.strip()
-    result = await account_manager.add_account(phone, code=code, password=password, api_id=data.get("api_id"), api_hash=data.get("api_hash"))
+
+    # ← ИСПРАВЛЕНО: используем открытое соединение, а не создаём новое
+    result = await account_manager.complete_password_login(phone, password)
+
     if result["status"] == "success":
         text = f"{CHECK} Аккаунт <b>{result['name']}</b> добавлен!" + NL + f"{EYES} ID: {result['id']}"
         await message.answer(text, reply_markup=admin_panel_kb(), parse_mode="HTML")
