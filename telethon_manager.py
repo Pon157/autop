@@ -24,7 +24,7 @@ class AccountManager:
         self.flood_waits: Dict[int, int] = {}
         self._code_hashes: Dict[str, str] = {}
         self._pending_qr: Dict[str, dict] = {}
-        self._pending_auth: Dict[str, dict] = {}   # ← НОВОЕ: phone → {client, ...}
+        self._pending_auth: Dict[str, dict] = {}   # phone → {client, ...}
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
@@ -34,7 +34,6 @@ class AccountManager:
             acc = db.get_account(account_id)
             if acc and acc.get("api_id") and acc.get("api_hash"):
                 return int(acc["api_id"]), acc["api_hash"]
-        # fallback: .env
         api_id = int(os.getenv("API_ID", "0")) if os.getenv("API_ID") else 0
         api_hash = os.getenv("API_HASH", "")
         return api_id, api_hash
@@ -94,7 +93,6 @@ class AccountManager:
                     await client.sign_in(phone, code, phone_code_hash=pch)
                 except SessionPasswordNeededError:
                     if not password:
-                        # ← НОВОЕ: сохраняем клиент, чтобы потом ввести пароль в том же соединении
                         self._pending_auth[phone] = {
                             "client": client,
                             "session_name": session_name,
@@ -142,18 +140,15 @@ class AccountManager:
             await client.sign_in(password=password)
             me = await client.get_me()
             db.add_account(phone, session_name, api_id, api_hash)
-
             acc_id = None
             for a in db.get_accounts():
                 if a["phone"] == phone:
                     acc_id = a["id"]
                     break
-
             if acc_id:
                 self.clients[acc_id] = client
             else:
                 await client.disconnect()
-
             return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
         except Exception as e:
             await client.disconnect()
@@ -197,7 +192,8 @@ class AccountManager:
             qr_login = await client.qr_login()
             self._pending_qr[phone] = {
                 "client": client, "qr_login": qr_login, "session": session_name,
-                "owner_id": owner_id, "bot": bot, "api_id": str(aid), "api_hash": ahash
+                "owner_id": owner_id, "bot": bot, "api_id": str(aid), "api_hash": ahash,
+                "needs_password": False
             }
 
             if QR_AVAILABLE:
@@ -231,6 +227,7 @@ class AccountManager:
             await qr_login.wait(timeout=180)
         except SessionPasswordNeededError:
             if not password:
+                pending["needs_password"] = True
                 await bot.send_message(
                     owner_id,
                     f"{LOCK} <b>Требуется пароль 2FA</b>\n\n"
@@ -238,7 +235,6 @@ class AccountManager:
                     f"{WARNING} Отправьте /password ваш_пароль",
                     parse_mode="HTML"
                 )
-                # Сохраняем состояние для повторного входа
                 return
             try:
                 await client.sign_in(password=password)
@@ -258,6 +254,7 @@ class AccountManager:
             del self._pending_qr[phone]
             return
 
+        # Успешная авторизация (QR или QR+пароль)
         try:
             me = await client.get_me()
             db.add_account(phone, session_name, api_id, api_hash)
@@ -279,6 +276,45 @@ class AccountManager:
         finally:
             if phone in self._pending_qr:
                 del self._pending_qr[phone]
+
+    async def complete_qr_password_login(self, phone: str, password: str) -> Dict:
+        """Завершает QR-вход, когда требуется 2FA-пароль."""
+        pending = self._pending_qr.get(phone)
+        if not pending:
+            return {"status": "error", "msg": "Сессия устарела. Начните заново."}
+        if not pending.get("needs_password"):
+            return {"status": "error", "msg": "Пароль не требуется или уже обработан."}
+
+        client = pending["client"]
+        owner_id = pending["owner_id"]
+        bot = pending["bot"]
+        session_name = pending["session"]
+        api_id = pending["api_id"]
+        api_hash = pending["api_hash"]
+
+        try:
+            await client.sign_in(password=password)
+            me = await client.get_me()
+            db.add_account(phone, session_name, api_id, api_hash)
+            acc_id = None
+            for a in db.get_accounts():
+                if a["phone"] == phone:
+                    acc_id = a["id"]
+                    break
+            if acc_id:
+                self.clients[acc_id] = client
+            await bot.send_message(
+                owner_id,
+                f"{CHECK} Аккаунт <b>{me.first_name}</b> ({phone}) добавлен через QR!\n{EYES} ID: {acc_id}",
+                parse_mode="HTML"
+            )
+            return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
+        except Exception as e:
+            await client.disconnect()
+            await bot.send_message(owner_id, f"{CROSS} Ошибка 2FA: {str(e)[:200]}", parse_mode="HTML")
+            return {"status": "error", "msg": str(e)}
+        finally:
+            self._pending_qr.pop(phone, None)
 
     async def import_session_file(self, phone: str, session_bytes: bytes, owner_id: int, bot, api_id: str = None, api_hash: str = None) -> dict:
         aid = int(api_id) if api_id else 0
