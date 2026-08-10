@@ -260,6 +260,11 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM chat_folders WHERE id = ?", (folder_id,))
 
+    def update_folder_chats(self, folder_id: int, chat_ids: list):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE chat_folders SET chat_ids = ? WHERE id = ?", (json.dumps(chat_ids), folder_id))
+
     def add_payment(self, user_id: int, payment_id: str, amount: float):
         with self._connect() as conn:
             cursor = conn.cursor()
