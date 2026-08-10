@@ -1,6 +1,7 @@
 """Модерация постов — одобрение/отклонение"""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 from database import db
@@ -25,9 +26,13 @@ async def cb_mod_approve(callback: CallbackQuery):
         return
     db.update_post_status(post_id, "approved")
     try:
+        builder = InlineKeyboardBuilder()
+        builder.button(text=f"{GEAR} Настроить рассылку", callback_data=f"post_setup_{post_id}")
+        builder.button(text=f"{BACK} Главное меню", callback_data="main_menu")
+        builder.adjust(1)
         text = f"{CHECK} <b>Ваш пост одобрен!</b>" + "\n\n"
-        text += f"{ARROW_RIGHT} Теперь выберите аккаунты и чаты для рассылки."
-        await callback.bot.send_message(post["user_id"], text, parse_mode="HTML")
+        text += f"{ARROW_RIGHT} Теперь настройте аккаунты и чаты для рассылки."
+        await callback.bot.send_message(post["user_id"], text, reply_markup=builder.as_markup(), parse_mode="HTML")
     except Exception as e:
         print(f"[Moderation] Ошибка уведомления пользователя: {e}")
     text = f"{CHECK} <b>Пост #{post_id} одобрен</b>" + "\n"
