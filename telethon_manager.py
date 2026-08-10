@@ -15,14 +15,23 @@ from database import db
 from emoji_data import *
 
 
+def _get_proxy():
+    """Получает глобальный прокси из .env."""
+    return config.parse_proxy(config.PROXY_URL)
+
+
 class AccountManager:
     def __init__(self):
         self.clients: Dict[int, TelegramClient] = {}
         self.flood_waits: Dict[int, int] = {}
-        self._code_hashes: Dict[str, str] = {}  # phone -> phone_code_hash
-        self._pending_qr: Dict[str, dict] = {}  # phone -> {client, qr_login, session, owner_id, bot}
+        self._code_hashes: Dict[str, str] = {}
+        self._pending_qr: Dict[str, dict] = {}
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+
+    def _get_api(self):
+        """Возвращает (api_id, api_hash) из БД или .env."""
+        return db.get_api_credentials()
 
     async def start_monitoring(self):
         self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -56,9 +65,13 @@ class AccountManager:
 
     async def add_account(self, phone: str, code: str = None, password: str = None) -> Dict:
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        api_id, api_hash = self._get_api()
+        if not api_id or not api_hash:
+            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
         session_path = os.path.join(config.SESSIONS_DIR, session_name)
-        client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+        proxy = _get_proxy()
+        client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
         try:
             await client.connect()
             if not await client.is_user_authorized():
@@ -95,7 +108,6 @@ class AccountManager:
             return {"status": "error", "msg": str(e)}
 
     async def start_qr_login(self, phone: str, owner_id: int, bot) -> dict:
-        """Начало QR-логина. Возвращает QR-изображение или URL."""
         try:
             import qrcode
             from io import BytesIO
@@ -103,10 +115,15 @@ class AccountManager:
         except ImportError:
             QR_AVAILABLE = False
 
+        api_id, api_hash = self._get_api()
+        if not api_id or not api_hash:
+            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
+
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
         session_path = os.path.join(config.SESSIONS_DIR, session_name)
-        client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+        proxy = _get_proxy()
+        client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
 
         try:
             await client.connect()
@@ -149,17 +166,14 @@ class AccountManager:
             return {"status": "error", "msg": str(e)}
 
     async def wait_qr_login(self, phone: str):
-        """Ожидание QR-логина в фоновой задаче."""
         pending = self._pending_qr.get(phone)
         if not pending:
             return
-
         client = pending["client"]
         qr_login = pending["qr_login"]
         owner_id = pending["owner_id"]
         bot = pending["bot"]
         session_name = pending["session"]
-
         try:
             await qr_login.wait(timeout=180)
             me = await client.get_me()
@@ -172,8 +186,6 @@ class AccountManager:
                     break
             if acc_id:
                 self.clients[acc_id] = client
-
-            from emoji_data import CHECK, EYES
             await bot.send_message(
                 owner_id,
                 f"{CHECK} Аккаунт <b>{me.first_name}</b> ({phone}) добавлен через QR!\n{EYES} ID: {acc_id}",
@@ -181,7 +193,6 @@ class AccountManager:
             )
         except asyncio.TimeoutError:
             await client.disconnect()
-            from emoji_data import CROSS
             await bot.send_message(
                 owner_id,
                 f"{CROSS} Время ожидания QR-логина истекло (3 мин). Попробуйте снова.",
@@ -189,7 +200,6 @@ class AccountManager:
             )
         except Exception as e:
             await client.disconnect()
-            from emoji_data import CROSS
             await bot.send_message(
                 owner_id,
                 f"{CROSS} Ошибка QR-входа: {str(e)[:200]}",
@@ -200,23 +210,23 @@ class AccountManager:
                 del self._pending_qr[phone]
 
     async def import_session_file(self, phone: str, session_bytes: bytes, owner_id: int, bot) -> dict:
-        """Импорт готового .session файла."""
+        api_id, api_hash = self._get_api()
+        if not api_id or not api_hash:
+            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
+
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
         session_path = os.path.join(config.SESSIONS_DIR, session_name)
-
         try:
             with open(f"{session_path}.session", "wb") as f:
                 f.write(session_bytes)
-
-            client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+            proxy = _get_proxy()
+            client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
             await client.connect()
-
             if not await client.is_user_authorized():
                 await client.disconnect()
                 os.remove(f"{session_path}.session")
                 return {"status": "error", "msg": "Сессия не авторизована. Залейте валидный .session файл."}
-
             me = await client.get_me()
             db.add_account(phone, session_name)
             accounts = db.get_accounts()
@@ -229,13 +239,11 @@ class AccountManager:
                 self.clients[acc_id] = client
             else:
                 await client.disconnect()
-
             return {"status": "success", "phone": phone, "name": me.first_name, "id": acc_id}
         except Exception as e:
             if os.path.exists(f"{session_path}.session"):
                 os.remove(f"{session_path}.session")
             return {"status": "error", "msg": str(e)}
-
 
     async def get_account_dialogs(self, account_id: int) -> List[Dict]:
         if account_id not in self.clients:
@@ -299,11 +307,16 @@ class AccountManager:
 
     async def load_sessions(self):
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
+        api_id, api_hash = self._get_api()
+        if not api_id or not api_hash:
+            print("[Load Sessions] API_ID/API_HASH не настроены. Пропускаю загрузку сессий.")
+            return
         accounts = db.get_accounts()
         for acc in accounts:
             session_path = os.path.join(config.SESSIONS_DIR, acc["session_name"])
             if os.path.exists(f"{session_path}.session"):
-                client = TelegramClient(session_path, config.API_ID, config.API_HASH)
+                proxy = _get_proxy()
+                client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
                 try:
                     await client.connect()
                     if await client.is_user_authorized():
