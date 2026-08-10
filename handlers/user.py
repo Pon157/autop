@@ -6,6 +6,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
 from database import db
@@ -20,6 +21,13 @@ class UserStates(StatesGroup):
     waiting_post = State()
     creating_folder = State()
     editing_folder = State()
+
+
+class BroadcastSetup(StatesGroup):
+    selecting_accounts = State()
+    selecting_folders = State()
+    entering_chats = State()
+    confirm = State()
 
 
 @router.message(Command("start"))
@@ -79,35 +87,278 @@ async def process_post(message: Message, state: FSMContext):
     await state.clear()
 
 
+# === МОИ РАССЫЛКИ (исправлено) ===
 @router.callback_query(F.data == "menu_my_posts")
 async def cb_my_posts(callback: CallbackQuery):
     posts = db.get_user_posts(callback.from_user.id)
     if not posts:
         await callback.message.edit_text(f"{INFO} У вас пока нет рассылок.", reply_markup=back_kb())
         return
+
     text = f"{CHART} <b>Ваши рассылки:</b>" + "\n\n"
     for post in posts[:10]:
         status_emoji = {"pending": HOURGLASS, "approved": CHECK, "rejected": CROSS, "sending": PLAY, "completed": CHECK, "stopped": PAUSE}.get(post["status"], QUESTION)
         text += f"{status_emoji} Пост #{post['id']} — <b>{post['status']}</b>" + "\n"
-    last_post = posts[0]
-    await callback.message.edit_text(text, reply_markup=post_control_kb(last_post["id"], last_post["status"]), parse_mode="HTML")
+
+    builder = InlineKeyboardBuilder()
+    for post in posts[:5]:
+        if post["status"] == "approved":
+            builder.button(text=f"{GEAR} Настроить #{post['id']}", callback_data=f"post_setup_{post['id']}")
+        elif post["status"] in ["sending", "stopped", "completed"]:
+            builder.button(text=f"{CHART} Управление #{post['id']}", callback_data=f"post_manage_{post['id']}")
+
+    builder.button(text=f"{BACK} Назад", callback_data="main_menu")
+    builder.adjust(1)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    except Exception:
+        # Если сообщение не изменилось — просто ответим
+        await callback.answer(f"{CHART} Ваши рассылки")
 
 
+@router.callback_query(F.data.startswith("post_manage_"))
+async def cb_post_manage(callback: CallbackQuery):
+    post_id = int(callback.data.split("_")[-1])
+    post = db.get_post(post_id)
+    if not post:
+        await callback.answer(f"{CROSS} Пост не найден", show_alert=True)
+        return
+    text = f"{CHART} <b>Управление рассылкой #{post_id}</b>" + "\n\n"
+    text += f"{EYES} Статус: <b>{post['status']}</b>" + "\n"
+    text += f"{GEAR} Аккаунты: {post['selected_accounts']}" + "\n"
+    text += f"{FOLDER} Папки: {post['selected_folders']}" + "\n"
+    text += f"{SPEECH} Чаты: {post['selected_chats']}"
+    await callback.message.edit_text(text, reply_markup=post_control_kb(post_id, post["status"]), parse_mode="HTML")
+
+
+# === НАСТРОЙКА РАССЫЛКИ ===
+@router.callback_query(F.data.startswith("post_setup_"))
+async def cb_post_setup(callback: CallbackQuery, state: FSMContext):
+    post_id = int(callback.data.split("_")[-1])
+    post = db.get_post(post_id)
+    if not post or post["user_id"] != callback.from_user.id:
+        await callback.answer(f"{CROSS} Пост не найден", show_alert=True)
+        return
+
+    accounts = db.get_accounts(status="active")
+    if not accounts:
+        await callback.message.edit_text(f"{CROSS} Нет доступных аккаунтов для рассылки.", reply_markup=back_kb("menu_my_posts"))
+        return
+
+    await state.update_data(post_id=post_id, selected_accounts=[], selected_folders=[], selected_chats=[])
+    await state.set_state(BroadcastSetup.selecting_accounts)
+
+    text = f"{EYES} <b>Шаг 1/3: Выберите аккаунты</b>" + "\n\n"
+    text += f"{INFO} Нажмите на аккаунт, чтобы выбрать/убрать."
+    await callback.message.edit_text(text, reply_markup=_build_accounts_kb(post_id, accounts, []), parse_mode="HTML")
+
+
+def _build_accounts_kb(post_id: int, accounts: list, selected: list):
+    builder = InlineKeyboardBuilder()
+    for acc in accounts:
+        mark = CHECK if acc["id"] in selected else "⭕"
+        builder.button(text=f"{mark} {acc['phone']}", callback_data=f"setup_acc_{post_id}_{acc['id']}")
+    builder.button(text=f"{ARROW_RIGHT} Далее (выбрано {len(selected)})", callback_data=f"setup_acc_done_{post_id}")
+    builder.button(text=f"{BACK} Назад", callback_data="menu_my_posts")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("setup_acc_"))
+async def cb_setup_account(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        return
+    post_id = int(parts[2])
+    acc_id = int(parts[3])
+
+    data = await state.get_data()
+    selected = data.get("selected_accounts", [])
+
+    if acc_id in selected:
+        selected.remove(acc_id)
+    else:
+        selected.append(acc_id)
+
+    await state.update_data(selected_accounts=selected)
+    accounts = db.get_accounts(status="active")
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_build_accounts_kb(post_id, accounts, selected))
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setup_acc_done_"))
+async def cb_setup_acc_done(callback: CallbackQuery, state: FSMContext):
+    post_id = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    selected = data.get("selected_accounts", [])
+
+    if not selected:
+        await callback.answer(f"{WARNING} Выберите хотя бы один аккаунт!", show_alert=True)
+        return
+
+    db.update_post_accounts(post_id, selected)
+
+    folders = db.get_folders(callback.from_user.id)
+    if folders:
+        await state.set_state(BroadcastSetup.selecting_folders)
+        text = f"{FOLDER} <b>Шаг 2/3: Выберите папки</b>" + "\n\n"
+        text += f"{INFO} Нажмите на папку, чтобы выбрать/убрать." + "\n"
+        text += f"{INFO} Можно пропустить этот шаг."
+        await callback.message.edit_text(text, reply_markup=_build_folders_kb(post_id, folders, []), parse_mode="HTML")
+    else:
+        await state.set_state(BroadcastSetup.entering_chats)
+        text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
+        text += f"{INFO} Отправьте ID чатов или @username через запятую:" + "\n"
+        text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>"
+        await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+
+
+def _build_folders_kb(post_id: int, folders: list, selected: list):
+    builder = InlineKeyboardBuilder()
+    for folder in folders:
+        mark = CHECK if folder["id"] in selected else "⭕"
+        builder.button(text=f"{mark} {folder['name']}", callback_data=f"setup_fold_{post_id}_{folder['id']}")
+    builder.button(text=f"{ARROW_RIGHT} Далее", callback_data=f"setup_fold_done_{post_id}")
+    builder.button(text=f"{SKIP} Пропустить", callback_data=f"setup_fold_skip_{post_id}")
+    builder.button(text=f"{BACK} Назад", callback_data=f"post_setup_{post_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+@router.callback_query(F.data.startswith("setup_fold_"))
+async def cb_setup_folder(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        return
+    post_id = int(parts[2])
+    folder_id = int(parts[3])
+
+    data = await state.get_data()
+    selected = data.get("selected_folders", [])
+
+    if folder_id in selected:
+        selected.remove(folder_id)
+    else:
+        selected.append(folder_id)
+
+    await state.update_data(selected_folders=selected)
+    folders = db.get_folders(callback.from_user.id)
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_build_folders_kb(post_id, folders, selected))
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("setup_fold_done_"))
+async def cb_setup_fold_done(callback: CallbackQuery, state: FSMContext):
+    post_id = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    selected = data.get("selected_folders", [])
+    db.update_post_folders(post_id, selected)
+
+    # Собираем чаты из папок
+    chat_ids = []
+    folders = db.get_folders(callback.from_user.id)
+    for folder in folders:
+        if folder["id"] in selected:
+            chat_ids.extend(json.loads(folder["chat_ids"]))
+
+    await state.update_data(selected_chats=chat_ids)
+    await state.set_state(BroadcastSetup.entering_chats)
+
+    text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
+    if chat_ids:
+        text += f"{CHECK} Из папок уже выбрано: <b>{len(chat_ids)}</b> чатов." + "\n"
+    text += f"{INFO} Отправьте дополнительные ID чатов или @username через запятую:" + "\n"
+    text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>" + "\n\n"
+    text += f"{INFO} Если дополнительных чатов не нужно — отправьте <code>-</code>"
+    await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("setup_fold_skip_"))
+async def cb_setup_fold_skip(callback: CallbackQuery, state: FSMContext):
+    post_id = int(callback.data.split("_")[-1])
+    db.update_post_folders(post_id, [])
+    await state.set_state(BroadcastSetup.entering_chats)
+    text = f"{SPEECH} <b>Шаг 3/3: Введите чаты</b>" + "\n\n"
+    text += f"{INFO} Отправьте ID чатов или @username через запятую:" + "\n"
+    text += f"{EXAMPLE} Пример: <code>@channel1, @channel2, -1001234567890</code>"
+    await callback.message.edit_text(text, reply_markup=back_kb("menu_my_posts"), parse_mode="HTML")
+
+
+@router.message(BroadcastSetup.entering_chats)
+async def process_chats(message: Message, state: FSMContext):
+    data = await state.get_data()
+    post_id = data.get("post_id")
+    existing_chats = data.get("selected_chats", [])
+
+    raw = message.text.strip()
+    if raw == "-":
+        new_chats = []
+    else:
+        new_chats = [c.strip() for c in raw.split(",") if c.strip()]
+
+    all_chats = existing_chats + new_chats
+    if not all_chats:
+        await message.answer(f"{CROSS} Добавьте хотя бы один чат!", reply_markup=back_kb("menu_my_posts"))
+        return
+
+    db.update_post_chats(post_id, all_chats)
+    await state.update_data(selected_chats=all_chats)
+    await state.set_state(BroadcastSetup.confirm)
+
+    post = db.get_post(post_id)
+    accounts = json.loads(post["selected_accounts"])
+    chats = json.loads(post["selected_chats"])
+
+    text = f"{CHART} <b>Подтверждение рассылки #{post_id}</b>" + "\n\n"
+    text += f"{EYES} Аккаунтов: <b>{len(accounts)}</b>" + "\n"
+    text += f"{SPEECH} Чатов: <b>{len(chats)}</b>" + "\n\n"
+    text += f"{INFO} Запустить рассылку?"
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"{PLAY} Запустить", callback_data=f"post_start_{post_id}")
+    builder.button(text=f"{BACK} Назад", callback_data="menu_my_posts")
+    builder.adjust(1)
+    await message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+
+# === УПРАВЛЕНИЕ РАССЫЛКОЙ ===
 @router.callback_query(F.data.startswith("post_stop_"))
 async def cb_post_stop(callback: CallbackQuery):
     post_id = int(callback.data.split("_")[-1])
     db.update_post_status(post_id, "stopped")
     await callback.answer(f"{PAUSE} Рассылка остановлена")
-    await cb_my_posts(callback)
+    await cb_post_manage(callback)
 
 
 @router.callback_query(F.data.startswith("post_start_"))
-async def cb_post_start(callback: CallbackQuery):
+async def cb_post_start(callback: CallbackQuery, state: FSMContext):
     post_id = int(callback.data.split("_")[-1])
+    post = db.get_post(post_id)
+    if not post:
+        await callback.answer(f"{CROSS} Пост не найден", show_alert=True)
+        return
+
+    accounts_ids = json.loads(post["selected_accounts"]) if post["selected_accounts"] else []
+    chat_ids = json.loads(post["selected_chats"]) if post["selected_chats"] else []
+
+    if not accounts_ids or not chat_ids:
+        await callback.answer(f"{CROSS} Сначала настройте аккаунты и чаты!", show_alert=True)
+        return
+
     db.update_post_status(post_id, "sending")
     await callback.answer(f"{PLAY} Рассылка запущена")
+    await state.clear()
     await start_broadcast(post_id, callback.bot)
-    await cb_my_posts(callback)
+    await cb_post_manage(callback)
 
 
 @router.callback_query(F.data.startswith("post_status_"))
@@ -133,14 +384,7 @@ async def cb_post_delete(callback: CallbackQuery):
     await cb_my_posts(callback)
 
 
-async def start_broadcast_setup(callback: CallbackQuery, post_id: int):
-    accounts = db.get_accounts(status="active")
-    if not accounts:
-        await callback.message.edit_text(f"{CROSS} Нет доступных аккаунтов для рассылки.", reply_markup=back_kb())
-        return
-    await callback.message.edit_text(f"{EYES} <b>Выберите аккаунты для рассылки:</b>", reply_markup=select_accounts_kb(accounts), parse_mode="HTML")
-
-
+# === ПАПКИ ===
 @router.callback_query(F.data == "menu_folders")
 async def cb_folders(callback: CallbackQuery):
     folders = db.get_folders(callback.from_user.id)
