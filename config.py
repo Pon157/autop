@@ -24,7 +24,7 @@ API_ID = int(os.getenv("API_ID", "0")) if os.getenv("API_ID") else 0
 API_HASH = os.getenv("API_HASH", "")
 SESSIONS_DIR = os.path.abspath(os.getenv("SESSIONS_DIR", "sessions"))
 
-# === PROXY (глобальный, из .env) ===
+# === PROXY (только для Telethon-сессий; aiogram-бот использует прямое соединение) ===
 PROXY_URL = os.getenv("PROXY_URL", "")
 
 
