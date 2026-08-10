@@ -1,11 +1,10 @@
-"""Управление Telethon сессиями, флудвейтами, заморозками"""
+"""Управление Telethon сессиями"""
 import os
 import asyncio
-import json
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict
+from datetime import datetime
+from typing import List, Dict
 from telethon import TelegramClient
-from telethon.errors import FloodWaitError, UserDeactivatedError, AuthKeyDuplicatedError, \
+from telethon.errors import FloodWaitError, UserDeactivatedError, \
     SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError
 from telethon.tl.functions.messages import GetDialogsRequest
 from telethon.tl.types import InputPeerEmpty
@@ -16,7 +15,6 @@ from emoji_data import *
 
 
 def _get_proxy():
-    """Получает глобальный прокси из .env."""
     return config.parse_proxy(config.PROXY_URL)
 
 
@@ -29,9 +27,16 @@ class AccountManager:
         self._monitor_task = None
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
 
-    def _get_api(self):
-        """Возвращает (api_id, api_hash) из БД или .env."""
-        return db.get_api_credentials()
+    def _get_api(self, account_id: int = None):
+        """API для аккаунта (из БД) или глобальные (из .env)."""
+        if account_id:
+            acc = db.get_account(account_id)
+            if acc and acc.get("api_id") and acc.get("api_hash"):
+                return int(acc["api_id"]), acc["api_hash"]
+        # fallback: .env
+        api_id = int(os.getenv("API_ID", "0")) if os.getenv("API_ID") else 0
+        api_hash = os.getenv("API_HASH", "")
+        return api_id, api_hash
 
     async def start_monitoring(self):
         self._monitor_task = asyncio.create_task(self._monitor_loop())
@@ -45,8 +50,7 @@ class AccountManager:
             await asyncio.sleep(30)
 
     async def _check_accounts(self):
-        accounts = db.get_accounts()
-        for acc in accounts:
+        for acc in db.get_accounts():
             acc_id = acc["id"]
             if acc["flood_wait_until"] > int(datetime.now().timestamp()):
                 if acc["status"] != "flood_wait":
@@ -63,38 +67,40 @@ class AccountManager:
                         db.update_account_status(acc_id, "error")
                         print(f"[Account {acc_id}] Connection error: {e}")
 
-    async def add_account(self, phone: str, code: str = None, password: str = None) -> Dict:
+    async def add_account(self, phone: str, code: str = None, password: str = None, api_id: str = None, api_hash: str = None) -> Dict:
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
-        api_id, api_hash = self._get_api()
-        if not api_id or not api_hash:
-            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
+        aid = int(api_id) if api_id else 0
+        ahash = api_hash or ""
+        if not aid or not ahash:
+            return {"status": "error", "msg": "Укажите API_ID и API_HASH для этого аккаунта."}
+
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
         session_path = os.path.join(config.SESSIONS_DIR, session_name)
         proxy = _get_proxy()
-        client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
+        client = TelegramClient(session_path, aid, ahash, proxy=proxy)
+
         try:
             await client.connect()
             if not await client.is_user_authorized():
                 if not code:
                     result = await client.send_code_request(phone)
                     self._code_hashes[phone] = result.phone_code_hash
-                    return {"status": "code_needed", "phone": phone, "session": session_name}
-                phone_code_hash = self._code_hashes.get(phone)
-                if not phone_code_hash:
+                    return {"status": "code_needed", "phone": phone, "session": session_name, "api_id": aid, "api_hash": ahash}
+                pch = self._code_hashes.get(phone)
+                if not pch:
                     return {"status": "error", "msg": "Сессия устарела. Начните заново."}
                 try:
-                    await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                    await client.sign_in(phone, code, phone_code_hash=pch)
                 except SessionPasswordNeededError:
                     if not password:
-                        return {"status": "password_needed", "phone": phone, "session": session_name}
+                        return {"status": "password_needed", "phone": phone, "session": session_name, "api_id": aid, "api_hash": ahash}
                     await client.sign_in(password=password)
                 except (PhoneCodeInvalidError, PhoneCodeExpiredError):
                     return {"status": "error", "msg": "Неверный или просроченный код"}
             me = await client.get_me()
-            db.add_account(phone, session_name)
-            accounts = db.get_accounts()
+            db.add_account(phone, session_name, str(aid), ahash)
             acc_id = None
-            for a in accounts:
+            for a in db.get_accounts():
                 if a["phone"] == phone:
                     acc_id = a["id"]
                     break
@@ -107,7 +113,7 @@ class AccountManager:
             await client.disconnect()
             return {"status": "error", "msg": str(e)}
 
-    async def start_qr_login(self, phone: str, owner_id: int, bot) -> dict:
+    async def start_qr_login(self, phone: str, owner_id: int, bot, api_id: str = None, api_hash: str = None) -> dict:
         try:
             import qrcode
             from io import BytesIO
@@ -115,24 +121,24 @@ class AccountManager:
         except ImportError:
             QR_AVAILABLE = False
 
-        api_id, api_hash = self._get_api()
-        if not api_id or not api_hash:
-            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
+        aid = int(api_id) if api_id else 0
+        ahash = api_hash or ""
+        if not aid or not ahash:
+            return {"status": "error", "msg": "Укажите API_ID и API_HASH для этого аккаунта."}
 
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
         session_path = os.path.join(config.SESSIONS_DIR, session_name)
         proxy = _get_proxy()
-        client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
+        client = TelegramClient(session_path, aid, ahash, proxy=proxy)
 
         try:
             await client.connect()
             if await client.is_user_authorized():
                 me = await client.get_me()
-                db.add_account(phone, session_name)
-                accounts = db.get_accounts()
+                db.add_account(phone, session_name, str(aid), ahash)
                 acc_id = None
-                for a in accounts:
+                for a in db.get_accounts():
                     if a["phone"] == phone:
                         acc_id = a["id"]
                         break
@@ -142,11 +148,8 @@ class AccountManager:
 
             qr_login = await client.qr_login()
             self._pending_qr[phone] = {
-                "client": client,
-                "qr_login": qr_login,
-                "session": session_name,
-                "owner_id": owner_id,
-                "bot": bot
+                "client": client, "qr_login": qr_login, "session": session_name,
+                "owner_id": owner_id, "bot": bot, "api_id": str(aid), "api_hash": ahash
             }
 
             if QR_AVAILABLE:
@@ -160,12 +163,11 @@ class AccountManager:
                 return {"status": "qr_image", "phone": phone, "qr_buffer": buffer, "qr_url": qr_login.url}
             else:
                 return {"status": "qr_url", "phone": phone, "qr_url": qr_login.url}
-
         except Exception as e:
             await client.disconnect()
             return {"status": "error", "msg": str(e)}
 
-    async def wait_qr_login(self, phone: str):
+    async def wait_qr_login(self, phone: str, password: str = None):
         pending = self._pending_qr.get(phone)
         if not pending:
             return
@@ -174,13 +176,45 @@ class AccountManager:
         owner_id = pending["owner_id"]
         bot = pending["bot"]
         session_name = pending["session"]
+        api_id = pending["api_id"]
+        api_hash = pending["api_hash"]
+
         try:
             await qr_login.wait(timeout=180)
+        except SessionPasswordNeededError:
+            if not password:
+                await bot.send_message(
+                    owner_id,
+                    f"{LOCK} <b>Требуется пароль 2FA</b>\n\n"
+                    f"{INFO} Введите пароль от аккаунта {phone}:\n"
+                    f"{WARNING} Отправьте /password ваш_пароль",
+                    parse_mode="HTML"
+                )
+                # Сохраняем состояние для повторного входа
+                return
+            try:
+                await client.sign_in(password=password)
+            except Exception as e:
+                await client.disconnect()
+                await bot.send_message(owner_id, f"{CROSS} Ошибка 2FA: {str(e)[:200]}", parse_mode="HTML")
+                del self._pending_qr[phone]
+                return
+        except asyncio.TimeoutError:
+            await client.disconnect()
+            await bot.send_message(owner_id, f"{CROSS} Время ожидания QR истекло (3 мин).", parse_mode="HTML")
+            del self._pending_qr[phone]
+            return
+        except Exception as e:
+            await client.disconnect()
+            await bot.send_message(owner_id, f"{CROSS} Ошибка QR: {str(e)[:200]}", parse_mode="HTML")
+            del self._pending_qr[phone]
+            return
+
+        try:
             me = await client.get_me()
-            db.add_account(phone, session_name)
-            accounts = db.get_accounts()
+            db.add_account(phone, session_name, api_id, api_hash)
             acc_id = None
-            for a in accounts:
+            for a in db.get_accounts():
                 if a["phone"] == phone:
                     acc_id = a["id"]
                     break
@@ -191,28 +225,18 @@ class AccountManager:
                 f"{CHECK} Аккаунт <b>{me.first_name}</b> ({phone}) добавлен через QR!\n{EYES} ID: {acc_id}",
                 parse_mode="HTML"
             )
-        except asyncio.TimeoutError:
-            await client.disconnect()
-            await bot.send_message(
-                owner_id,
-                f"{CROSS} Время ожидания QR-логина истекло (3 мин). Попробуйте снова.",
-                parse_mode="HTML"
-            )
         except Exception as e:
             await client.disconnect()
-            await bot.send_message(
-                owner_id,
-                f"{CROSS} Ошибка QR-входа: {str(e)[:200]}",
-                parse_mode="HTML"
-            )
+            await bot.send_message(owner_id, f"{CROSS} Ошибка: {str(e)[:200]}", parse_mode="HTML")
         finally:
             if phone in self._pending_qr:
                 del self._pending_qr[phone]
 
-    async def import_session_file(self, phone: str, session_bytes: bytes, owner_id: int, bot) -> dict:
-        api_id, api_hash = self._get_api()
-        if not api_id or not api_hash:
-            return {"status": "error", "msg": "API_ID и API_HASH не настроены. Введите их в админ-панели."}
+    async def import_session_file(self, phone: str, session_bytes: bytes, owner_id: int, bot, api_id: str = None, api_hash: str = None) -> dict:
+        aid = int(api_id) if api_id else 0
+        ahash = api_hash or ""
+        if not aid or not ahash:
+            return {"status": "error", "msg": "Укажите API_ID и API_HASH для этого аккаунта."}
 
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
         session_name = f"session_{phone.replace('+', '').replace('-', '')}"
@@ -221,17 +245,16 @@ class AccountManager:
             with open(f"{session_path}.session", "wb") as f:
                 f.write(session_bytes)
             proxy = _get_proxy()
-            client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
+            client = TelegramClient(session_path, aid, ahash, proxy=proxy)
             await client.connect()
             if not await client.is_user_authorized():
                 await client.disconnect()
                 os.remove(f"{session_path}.session")
-                return {"status": "error", "msg": "Сессия не авторизована. Залейте валидный .session файл."}
+                return {"status": "error", "msg": "Сессия не авторизована."}
             me = await client.get_me()
-            db.add_account(phone, session_name)
-            accounts = db.get_accounts()
+            db.add_account(phone, session_name, str(aid), ahash)
             acc_id = None
-            for a in accounts:
+            for a in db.get_accounts():
                 if a["phone"] == phone:
                     acc_id = a["id"]
                     break
@@ -250,15 +273,8 @@ class AccountManager:
             return []
         client = self.clients[account_id]
         try:
-            dialogs = await client(GetDialogsRequest(
-                offset_date=None, offset_id=0, offset_peer=InputPeerEmpty(),
-                limit=200, hash=0
-            ))
-            result = []
-            for dialog in dialogs.chats:
-                chat_type = "channel" if hasattr(dialog, "broadcast") and dialog.broadcast else "chat"
-                result.append({"id": dialog.id, "title": dialog.title, "type": chat_type})
-            return result
+            dialogs = await client(GetDialogsRequest(offset_date=None, offset_id=0, offset_peer=InputPeerEmpty(), limit=200, hash=0))
+            return [{"id": d.id, "title": d.title, "type": "channel" if hasattr(d, "broadcast") and d.broadcast else "chat"} for d in dialogs.chats]
         except Exception as e:
             print(f"[Dialogs Error] {e}")
             return []
@@ -272,18 +288,16 @@ class AccountManager:
             db.increment_account_load(account_id)
             return {"status": "success"}
         except FloodWaitError as e:
-            wait_time = e.seconds
-            db.update_account_status(account_id, "flood_wait", wait_time)
-            self.flood_waits[account_id] = int(datetime.now().timestamp()) + wait_time
-            return {"status": "flood_wait", "wait": wait_time}
+            db.update_account_status(account_id, "flood_wait", e.seconds)
+            self.flood_waits[account_id] = int(datetime.now().timestamp()) + e.seconds
+            return {"status": "flood_wait", "wait": e.seconds}
         except UserDeactivatedError:
             db.update_account_status(account_id, "banned")
             return {"status": "banned"}
         except Exception as e:
             return {"status": "error", "msg": str(e)}
 
-    async def send_broadcast(self, post_id: int, account_id: int, chat_ids: List[int],
-                            channel_id: int, channel_msg_id: int, interval: tuple = None):
+    async def send_broadcast(self, post_id: int, account_id: int, chat_ids: List[int], channel_id: int, channel_msg_id: int, interval: tuple = None):
         if account_id not in self.clients:
             return
         interval = interval or config.DEFAULT_SEND_INTERVAL
@@ -292,8 +306,7 @@ class AccountManager:
             if not post or post["status"] == "stopped":
                 break
             if self.flood_waits.get(account_id, 0) > int(datetime.now().timestamp()):
-                db.add_log(post_id, account_id, chat_id, "flood_wait",
-                          f"Flood wait until {self.flood_waits[account_id]}")
+                db.add_log(post_id, account_id, chat_id, "flood_wait", f"Flood wait until {self.flood_waits[account_id]}")
                 continue
             result = await self.forward_post(account_id, channel_id, channel_msg_id, chat_id)
             if result["status"] == "success":
@@ -307,16 +320,15 @@ class AccountManager:
 
     async def load_sessions(self):
         os.makedirs(config.SESSIONS_DIR, exist_ok=True)
-        api_id, api_hash = self._get_api()
-        if not api_id or not api_hash:
-            print("[Load Sessions] API_ID/API_HASH не настроены. Пропускаю загрузку сессий.")
-            return
-        accounts = db.get_accounts()
-        for acc in accounts:
+        for acc in db.get_accounts():
+            aid = int(acc["api_id"]) if acc.get("api_id") else 0
+            ahash = acc.get("api_hash", "")
+            if not aid or not ahash:
+                continue
             session_path = os.path.join(config.SESSIONS_DIR, acc["session_name"])
             if os.path.exists(f"{session_path}.session"):
                 proxy = _get_proxy()
-                client = TelegramClient(session_path, api_id, api_hash, proxy=proxy)
+                client = TelegramClient(session_path, aid, ahash, proxy=proxy)
                 try:
                     await client.connect()
                     if await client.is_user_authorized():
