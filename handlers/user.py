@@ -1,6 +1,7 @@
 """Панель пользователя — рассылка постов"""
 import json
 import asyncio
+import re
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
@@ -87,7 +88,7 @@ async def process_post(message: Message, state: FSMContext):
     await state.clear()
 
 
-# === МОИ РАССЫЛКИ (исправлено) ===
+# === МОИ РАССЫЛКИ ===
 @router.callback_query(F.data == "menu_my_posts")
 async def cb_my_posts(callback: CallbackQuery):
     posts = db.get_user_posts(callback.from_user.id)
@@ -113,7 +114,6 @@ async def cb_my_posts(callback: CallbackQuery):
     try:
         await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
     except Exception:
-        # Если сообщение не изменилось — просто ответим
         await callback.answer(f"{CHART} Ваши рассылки")
 
 
@@ -165,11 +165,10 @@ def _build_accounts_kb(post_id: int, accounts: list, selected: list):
     return builder.as_markup()
 
 
-@router.callback_query(F.data.startswith("setup_acc_"))
+# ТОЧНЫЙ ФИЛЬТР: setup_acc_число_число (не ловит setup_acc_done)
+@router.callback_query(F.data.regexp(r"^setup_acc_\d+_\d+$"))
 async def cb_setup_account(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
-    if len(parts) < 4:
-        return
     post_id = int(parts[2])
     acc_id = int(parts[3])
 
@@ -230,11 +229,10 @@ def _build_folders_kb(post_id: int, folders: list, selected: list):
     return builder.as_markup()
 
 
-@router.callback_query(F.data.startswith("setup_fold_"))
+# ТОЧНЫЙ ФИЛЬТР: setup_fold_число_число
+@router.callback_query(F.data.regexp(r"^setup_fold_\d+_\d+$"))
 async def cb_setup_folder(callback: CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
-    if len(parts) < 4:
-        return
     post_id = int(parts[2])
     folder_id = int(parts[3])
 
@@ -263,7 +261,6 @@ async def cb_setup_fold_done(callback: CallbackQuery, state: FSMContext):
     selected = data.get("selected_folders", [])
     db.update_post_folders(post_id, selected)
 
-    # Собираем чаты из папок
     chat_ids = []
     folders = db.get_folders(callback.from_user.id)
     for folder in folders:
