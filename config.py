@@ -19,13 +19,14 @@ PREMIUM_PRICE = 150
 # === DATABASE ===
 DB_PATH = os.path.abspath(os.getenv("DB_PATH", "bot_database.db"))
 
-# === TELETHON (fallback из .env) ===
-_API_ID = int(os.getenv("API_ID", "0")) if os.getenv("API_ID") else 0
-_API_HASH = os.getenv("API_HASH", "")
+# === TELETHON ===
+API_ID = int(os.getenv("API_ID", "0")) if os.getenv("API_ID") else 0
+API_HASH = os.getenv("API_HASH", "")
 SESSIONS_DIR = os.path.abspath(os.getenv("SESSIONS_DIR", "sessions"))
 
-# === PROXY (только из .env, глобальный) ===
+# === PROXY (глобальный, из .env) ===
 PROXY_URL = os.getenv("PROXY_URL", "")
+
 
 def parse_proxy(proxy_url: str):
     """Парсит URL прокси в формат Telethon."""
@@ -46,6 +47,7 @@ def parse_proxy(proxy_url: str):
         secret = parsed.path.lstrip("/") if parsed.path else ""
         return ("mtproto", host, port, secret)
     return None
+
 
 # === LIMITS ===
 FLOOD_WAIT_THRESHOLD = 60
