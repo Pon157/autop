@@ -1,5 +1,5 @@
-import os
 """Работа с базой данных (SQLite)"""
+import os
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta
@@ -32,13 +32,13 @@ class Database:
         with self._connect() as conn:
             cursor = conn.cursor()
 
-            # Аккаунты (добавленные owner'ом)
+            # Аккаунты
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     phone TEXT UNIQUE NOT NULL,
                     session_name TEXT NOT NULL,
-                    status TEXT DEFAULT 'active',  -- active, banned, flood_wait, error
+                    status TEXT DEFAULT 'active',
                     flood_wait_until INTEGER DEFAULT 0,
                     last_used INTEGER DEFAULT 0,
                     load_count INTEGER DEFAULT 0,
@@ -69,7 +69,7 @@ class Database:
                     user_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
                     channel_message_id INTEGER,
-                    status TEXT DEFAULT 'pending',  -- pending, approved, rejected, sending, completed, stopped
+                    status TEXT DEFAULT 'pending',
                     selected_accounts TEXT DEFAULT '[]',
                     selected_folders TEXT DEFAULT '[]',
                     selected_chats TEXT DEFAULT '[]',
@@ -78,7 +78,7 @@ class Database:
                 )
             """)
 
-            # Папки чатов (для премиум пользователей)
+            # Папки чатов
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_folders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +96,7 @@ class Database:
                     post_id INTEGER NOT NULL,
                     account_id INTEGER NOT NULL,
                     chat_id INTEGER NOT NULL,
-                    status TEXT DEFAULT 'success',  -- success, error, flood_wait
+                    status TEXT DEFAULT 'success',
                     error_msg TEXT,
                     sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -109,13 +109,45 @@ class Database:
                     user_id INTEGER NOT NULL,
                     payment_id TEXT UNIQUE NOT NULL,
                     amount REAL NOT NULL,
-                    status TEXT DEFAULT 'pending',  -- pending, succeeded, canceled
+                    status TEXT DEFAULT 'pending',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     paid_at TIMESTAMP DEFAULT NULL
                 )
             """)
 
+            # Настройки (API_ID, API_HASH и др.)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+            """)
+
             conn.commit()
+
+    # === SETTINGS ===
+    def get_setting(self, key: str, default: str = None) -> Optional[str]:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value)
+            )
+
+    def get_api_credentials(self) -> tuple:
+        """Возвращает (api_id, api_hash) из БД или .env"""
+        api_id = self.get_setting("api_id")
+        api_hash = self.get_setting("api_hash")
+        if api_id and api_hash:
+            return int(api_id), api_hash
+        return config._API_ID, config._API_HASH
 
     # === ACCOUNTS ===
     def add_account(self, phone: str, session_name: str) -> bool:
@@ -173,7 +205,7 @@ class Database:
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT OR IGNORE INTO users (user_id, username, first_name) 
+                """INSERT OR IGNORE INTO users (user_id, username, first_name)
                    VALUES (?, ?, ?)""",
                 (user_id, username, first_name)
             )
@@ -302,7 +334,7 @@ class Database:
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT INTO send_logs (post_id, account_id, chat_id, status, error_msg) 
+                """INSERT INTO send_logs (post_id, account_id, chat_id, status, error_msg)
                    VALUES (?, ?, ?, ?, ?)""",
                 (post_id, account_id, chat_id, status, error_msg)
             )
