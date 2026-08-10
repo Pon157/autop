@@ -32,7 +32,6 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
     builder.button(text=f"{PLUS} Добавить аккаунт", callback_data="admin_add_account")
     builder.button(text=f"{EYES} Все аккаунты", callback_data="admin_accounts")
     builder.button(text=f"{CHART} Статистика", callback_data="admin_stats")
-    builder.button(text=f"{GEAR} API настройки", callback_data="admin_api_settings")
     builder.button(text=f"{BACK} Назад", callback_data="main_menu")
     builder.adjust(1)
     return builder.as_markup()
